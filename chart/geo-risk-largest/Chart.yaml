@@ -1,0 +1,6 @@
+apiVersion: v2
+name: geo-risk-largest
+description: Helm chart for geospatial risk service (Largest scenario DB)
+type: application
+version: 0.3.0
+appVersion: "0.3.0"

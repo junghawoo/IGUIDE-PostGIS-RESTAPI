@@ -1,0 +1,9 @@
+geodata:
+  storage: 100Gi
+  storageClassName: ""
+  volumeName: geodata-pv
+
+postgres:
+  existingSecret: pg-secret
+  username: geo-iguide
+  database: geodb_largest

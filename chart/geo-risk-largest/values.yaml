@@ -1,0 +1,37 @@
+namespace: geo-risk-largest
+
+image:
+  repository: ghcr.io/iguide-postgis/geoapi
+  tag: latest
+  pullPolicy: IfNotPresent
+
+postgres:
+  image: ghcr.io/iguide-postgis/postgis:16-3.4
+  username: geo
+  password: CHANGEME
+  database: geodb_largest
+  storage: 50Gi
+  existingSecret: ""
+
+geodata:
+  storage: 100Gi
+  storageClassName: ""
+  gdbPath: "/data/Utah Inundation Profiles/Utah Inundation Profiles.gdb"
+  # volumeName: geodata-pv
+  # matchLabels: {}
+
+geoapi:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1
+      memory: 1Gi
+
+ingress:
+  enabled: true
+  host: api-largest.example.org
+  tlsSecret: geoapi-largest-tls
+  className: nginx

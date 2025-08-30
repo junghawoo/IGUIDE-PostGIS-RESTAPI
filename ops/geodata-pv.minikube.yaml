@@ -1,0 +1,14 @@
+# Use with: minikube mount "/Users/.../Utah Inundation Profiles:/mnt/geodata"
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: geodata-pv
+spec:
+  capacity:
+    storage: 200Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: "/mnt/geodata"
+    type: Directory

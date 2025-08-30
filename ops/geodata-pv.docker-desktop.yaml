@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: geodata-pv
+spec:
+  capacity:
+    storage: 200Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: "/Users/junghawoo/Documents/IGUIDE-PostGIS/081525-MikeEnglert/IGUIDE_Aging_Dam/Inundation Profiles/Utah Inundation Profiles"
+    type: Directory

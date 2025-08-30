@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pg-config
+  namespace: {{ .Values.namespace }}
+data:
+  POSTGRES_DB: {{ .Values.postgres.database }}
+  POSTGRES_USER: {{ .Values.postgres.username }}
+  init.sql: |
+    CREATE EXTENSION IF NOT EXISTS postgis;
+    CREATE SCHEMA IF NOT EXISTS gis;
+    CREATE OR REPLACE VIEW gis.inundation_zones_largest AS
+    SELECT objectid, damnumber, dam_name, geom
+    FROM (
+      SELECT objectid, damnumber, dam_name, geom,
+             ROW_NUMBER() OVER (PARTITION BY damnumber ORDER BY ST_Area(geom::geography) DESC) AS rn
+      FROM gis.inundation_zones
+    ) t
+    WHERE rn = 1;
