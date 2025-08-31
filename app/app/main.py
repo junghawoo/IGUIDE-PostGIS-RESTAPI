@@ -8,7 +8,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg import sql
 
-app = FastAPI(title="Geo Risk API", version="0.4.0")
+app = FastAPI(title="Geo Risk API", version="0.4.1")
 app.add_middleware(GZipMiddleware, minimum_size=1024)  # gzip responses ≥1KB
 
 # ---- DB config ----
@@ -113,7 +113,7 @@ def risk_summary(
         base AS (
           SELECT
             z.damnumber,
-            COALESCE(z.dam_name, dn."DamName") AS dam_name,
+            COALESCE(z.dam_name, dn.dam_name) AS dam_name,
             z.geom
           FROM zone z
           LEFT JOIN {nid_tbl} dn
@@ -142,7 +142,9 @@ def risk_summary(
             counts = {t: int(row[t]) for t in target_list}
             return {"damnumber": row["damnumber"], "dam_name": row["dam_name"], "counts": counts}
     except psycopg.Error as e:
-        raise HTTPException(status_code=500, detail=f"DB error: {e.pgerror or str(e)}")
+        # Avoid AttributeError when e.pgerror is missing
+        msg = getattr(e, "pgerror", None) or str(e)
+        raise HTTPException(status_code=500, detail=f"DB error: {msg}")
 
 def _parse_bbox(bbox: str) -> Tuple[float, float, float, float]:
     try:
@@ -217,7 +219,7 @@ def features_geojson(
         base AS (
           SELECT
             z.damnumber,
-            COALESCE(z.dam_name, dn."DamName") AS dam_name,
+            COALESCE(z.dam_name, dn.dam_name) AS dam_name,
             z.geom
           FROM zone z
           LEFT JOIN {nid_tbl} dn
@@ -268,7 +270,8 @@ def features_geojson(
             row = cur.fetchone()
             return JSONResponse(content=row["fc"])
     except psycopg.Error as e:
-        raise HTTPException(status_code=500, detail=f"DB error: {e.pgerror or str(e)}")
+        msg = getattr(e, "pgerror", None) or str(e)
+        raise HTTPException(status_code=500, detail=f"DB error: {msg}")
 
 @app.get("/risk/summary/top", response_class=JSONResponse)
 def risk_top(
@@ -284,12 +287,14 @@ def risk_top(
       WITH counts AS (
         SELECT
           z.damnumber,
-          COALESCE(z.dam_name, dn."DamName") AS dam_name,
+          COALESCE(z.dam_name, dn.dam_name) AS dam_name,
           COUNT(*)::int AS count
         FROM {zone_tbl} z
         LEFT JOIN {nid_tbl} dn ON dn.damnumber = z.damnumber
         JOIN {target_tbl} g ON ST_Intersects(g.geom, z.geom)
-        GROUP BY z.damnumber, dam_name
+        GROUP BY
+          z.damnumber,
+          COALESCE(z.dam_name, dn.dam_name)
       )
       SELECT damnumber, dam_name, count
       FROM counts
