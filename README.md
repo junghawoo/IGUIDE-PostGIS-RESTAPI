@@ -12,8 +12,11 @@ Mount your FileGDB at the path `/data/Utah Inundation Profiles.gdb` via the `geo
 (see `templates/geodata-pvc.yaml`). You can bind that PVC to a hostPath, NFS, or cloud disk.
 
 ## Build & push the API image
+
+This builds and push the built image to the repo.
+Users/researchers do not need to follow these steps.
 ```bash
-export IMAGE_REPO=ghcr.io/yourorg/geoapi
+export IMAGE_REPO=ghcr.io/iguide-postgis/geoapi
 docker build -t $IMAGE_REPO:latest ./app
 docker push $IMAGE_REPO:latest
 ```

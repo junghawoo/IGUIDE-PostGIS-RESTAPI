@@ -1,5 +1,7 @@
 import os
 from typing import Dict, List, Tuple
+# add near the imports
+from typing import Any, Annotated
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -24,7 +26,68 @@ ZONE_TABLE = os.getenv("DB_ZONE_TABLE", "inundation_zones_largest")
 # ---- Metrics cache config ----
 METRICS_CACHE_ENABLED = os.getenv("METRICS_CACHE", "true").lower() in {"1", "true", "yes"}
 METRICS_CACHE_TABLE   = os.getenv("METRICS_CACHE_TABLE", "risk_metrics_cache")
+# --- Units & targets ---
+MI_PER_M = 0.000621371192  # meters -> miles
 
+POINT = frozenset({"aviation","hazardous_waste","hospitals","power_plants","wwtp"})
+LINE  = frozenset({"ng_pipelines","railroads","transportation"})
+POLY  = frozenset({"gap_status","svi_tracts"})
+
+def _units_block(length_units: str) -> dict:
+    return {
+        "length": "miles" if length_units == "mi" else "meters",
+        "area": "m^2",
+        "points": "count",
+    }
+
+def _convert_length_in_row(row: dict, to_units: str) -> dict:
+    """Convert line metrics (m -> mi) for either flattened or nested `metrics` rows."""
+    if not isinstance(row, dict) or to_units != "mi":
+        return row
+
+    # Nested: row["metrics"][target]
+    m = row.get("metrics")
+    if isinstance(m, dict):
+        for k in LINE:
+            if k in m and isinstance(m[k], (int, float)):
+                m[k] = m[k] * MI_PER_M
+        row["metrics"] = m
+
+    # Flattened: row[target] directly
+    for k in LINE:
+        if k in row and isinstance(row[k], (int, float)):
+            row[k] = row[k] * MI_PER_M
+
+    return row
+
+def _convert_units_any(obj, length_units: str):
+    """
+    Apply length conversion (m -> mi) to any response shape:
+      - single dict with `metrics`
+      - list[dict] of rows (each with `metrics` or flattened)
+      - dict with `items`: list[dict]
+    Also ensure a consistent 'units' block exists.
+    """
+    if length_units not in ("m", "mi"):
+        length_units = "m"
+
+    if isinstance(obj, dict) and "items" in obj and isinstance(obj["items"], list):
+        obj["items"] = [_convert_length_in_row(dict(r), length_units) for r in obj["items"]]
+        obj["units"] = _units_block(length_units)
+        return obj
+
+    if isinstance(obj, list):
+        out = [_convert_length_in_row(dict(r), length_units) for r in obj]
+        return out
+
+    if isinstance(obj, dict):
+        out = _convert_length_in_row(dict(obj), length_units)
+        u = out.get("units") or {}
+        u.update(_units_block(length_units))
+        out["units"] = u
+        return out
+
+    return obj
 
 from typing import Optional
 
@@ -432,12 +495,16 @@ def _metrics_from_cache(cur, damnumber: str | None, target_list: list[str]) -> d
                 it[alias] = r[alias]
             items.append(it)
         return {"items": items}
+    
+from typing import Literal
+from fastapi import Query
 
 @app.get("/risk/metrics", response_class=JSONResponse)
 def risk_metrics(
     damnumber: str | None = Query(default=None, description="'UTxxxxx' or 'all'"),
     targets: str = Query(..., description="'all' or comma-separated targets"),
     precomputed: bool = Query(default=True, description="Use cached metrics when available"),
+    length: Literal["m", "mi"] = Query(default="m", description="Length unit for line metrics"),
 ):
     target_list = (
         sorted(POINT | LINE | POLY) if targets.strip().lower() == "all"
@@ -452,6 +519,17 @@ def risk_metrics(
             _ensure_zone_exists(cur, damnumber=damnumber)
 
         if precomputed and METRICS_CACHE_ENABLED:
-            return _metrics_from_cache(cur, damnumber, target_list)
+            result = _metrics_from_cache(cur, damnumber, target_list)
+        else:
+            result = _metrics_live(cur, damnumber, target_list)
 
-        # ... (your on-the-fly computation branch stays as-is)
+    # <-- perform conversion on the fully assembled result, regardless of shape
+    result = _convert_units_any(result, length)
+
+    # Ensure a units block (for list/flat responses that might not include it)
+    if isinstance(result, list):
+        # lists don’t carry a top-level units; leave as-is
+        return result
+    if isinstance(result, dict) and "units" not in result:
+        result["units"] = _units_block(length)
+    return result
