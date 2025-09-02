@@ -21,6 +21,44 @@ DB_PASS = os.getenv("POSTGRES_PASSWORD", os.getenv("PGPASSWORD", "postgres-iguid
 DB_SCHEMA = os.getenv("DB_SCHEMA", "gis")
 # expects: damnumber, dam_name, geom
 ZONE_TABLE = os.getenv("DB_ZONE_TABLE", "inundation_zones_largest")
+# ---- Metrics cache config ----
+METRICS_CACHE_ENABLED = os.getenv("METRICS_CACHE", "true").lower() in {"1", "true", "yes"}
+METRICS_CACHE_TABLE   = os.getenv("METRICS_CACHE_TABLE", "risk_metrics_cache")
+
+
+from typing import Optional
+
+def _cache_exists(cur) -> bool:
+    cur.execute(
+        """
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema=%s AND table_name=%s
+        """,
+        (DB_SCHEMA, METRICS_CACHE_TABLE),
+    )
+    return cur.fetchone() is not None
+
+def _cache_measure_srid(cur) -> int | None:
+    q = sql.SQL("SELECT measure_srid FROM {}.{} LIMIT 1").format(
+        sql.Identifier(DB_SCHEMA), sql.Identifier(METRICS_CACHE_TABLE)
+    )
+    cur.execute(q)
+    r = cur.fetchone()  # dict_row
+    return None if not r or r["measure_srid"] is None else int(r["measure_srid"])
+
+
+def _metric_columns_for_targets(target_list: List[str]) -> List[str]:
+    cols = []
+    for t in target_list:
+        gt = TARGET_GEOMTYPE[t]
+        if gt == "point":
+            cols.append(f"{t}_count")
+        elif gt == "line":
+            cols.append(f"{t}_length_m")
+        elif gt == "polygon":
+            cols.append(f"{t}_area_m2")
+    return cols
 
 def get_conn():
     return psycopg.connect(
@@ -334,3 +372,86 @@ def zone_geojson(damnumber: str | None = None, dam_name: str | None = None):
             "type": "FeatureCollection",
             "features": [{"type": "Feature", "geometry": row["g"], "properties": {}}]
         }
+
+
+POINT = {"aviation", "hazardous_waste", "hospitals", "power_plants", "wwtp"}
+LINE  = {"ng_pipelines", "railroads", "transportation"}
+POLY  = {"gap_status", "svi_tracts"}
+
+def _metrics_from_cache(cur, damnumber: str | None, target_list: list[str]) -> dict:
+    # Build column list per target (count / length_m / area_m2)
+    pairs: list[tuple[str, str]] = []
+    for t in target_list:
+        if t in POINT:
+            pairs.append((f"{t}_count", t))
+        elif t in LINE:
+            pairs.append((f"{t}_length_m", t))
+        elif t in POLY:
+            pairs.append((f"{t}_area_m2", t))
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown target: {t}")
+
+    cols_sql = sql.SQL(", ").join(
+        sql.SQL("{} AS {}").format(sql.Identifier(col), sql.Identifier(alias))
+        for col, alias in pairs
+    ) if pairs else sql.SQL("")
+
+    where_sql = sql.SQL("TRUE") if damnumber in (None, "", "all") else sql.SQL("damnumber = %s")
+    params = tuple() if damnumber in (None, "", "all") else (damnumber,)
+
+    q = sql.SQL("""
+        SELECT damnumber, dam_name{comma}{cols}
+        FROM {sch}.{tbl}
+        WHERE {where}
+    """).format(
+        sch=sql.Identifier(DB_SCHEMA),
+        tbl=sql.Identifier(METRICS_CACHE_TABLE),
+        where=where_sql,
+        comma=sql.SQL(", ") if cols_sql.as_string(cur.connection) else sql.SQL(""),
+        cols=cols_sql,
+    )
+
+    cur.execute(q, params if params else None)
+    rows = cur.fetchall()  # list[dict] (dict_row)
+    if not rows:
+        raise HTTPException(status_code=404, detail="No rows in cache for selection")
+
+    # If a single damnumber was requested, return a single object; otherwise list.
+    if damnumber not in (None, "", "all"):
+        r = rows[0]
+        out = {"damnumber": r["damnumber"], "dam_name": r["dam_name"], "metrics": {}}
+        for _, alias in pairs:
+            out["metrics"][alias] = r[alias]
+        return out
+    else:
+        # Bulk: return an array of dam summaries (damnumber, dam_name, + requested metrics)
+        items = []
+        for r in rows:
+            it = {"damnumber": r["damnumber"], "dam_name": r["dam_name"]}
+            for _, alias in pairs:
+                it[alias] = r[alias]
+            items.append(it)
+        return {"items": items}
+
+@app.get("/risk/metrics", response_class=JSONResponse)
+def risk_metrics(
+    damnumber: str | None = Query(default=None, description="'UTxxxxx' or 'all'"),
+    targets: str = Query(..., description="'all' or comma-separated targets"),
+    precomputed: bool = Query(default=True, description="Use cached metrics when available"),
+):
+    target_list = (
+        sorted(POINT | LINE | POLY) if targets.strip().lower() == "all"
+        else [t.strip() for t in targets.split(",") if t.strip()]
+    )
+    for t in target_list:
+        if t not in (POINT | LINE | POLY):
+            raise HTTPException(status_code=400, detail=f"Unknown target: {t}")
+
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        if damnumber not in ("all", None, ""):
+            _ensure_zone_exists(cur, damnumber=damnumber)
+
+        if precomputed and METRICS_CACHE_ENABLED:
+            return _metrics_from_cache(cur, damnumber, target_list)
+
+        # ... (your on-the-fly computation branch stays as-is)

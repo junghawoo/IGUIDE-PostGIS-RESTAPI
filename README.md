@@ -103,6 +103,8 @@ curl 'http://localhost:8080/healthz'
 curl 'http://localhost:8080/risk/summary?damnumber=UT00644&targets=power_plants,railroads&clip=true'
 curl -sS 'http://localhost:8080/risk/summary/top?target=railroads&n=10'
 curl 'http://localhost:8080/risk/features/power_plants.geojson?damnumber=UT00644&clip=true&limit=200'
+curl -sS 'http://localhost:8080/risk/summary/top?target=railroads&n=20' | jq .
+
 ```
 
 ## Testing the GeoAPI in Python
