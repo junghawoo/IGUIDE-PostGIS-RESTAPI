@@ -2,23 +2,41 @@ namespace: geo-risk-largest
 
 image:
   repository: ghcr.io/iguide-postgis/geoapi
-  tag: latest
+  tag: devfix 
   pullPolicy: IfNotPresent
 
 postgres:
-  image: ghcr.io/iguide-postgis/postgis:16-3.4
-  username: geo
-  password: CHANGEME
+  image: postgis/postgis:16-3.4
+  username: geo-iguide
+  password: postgres-iguide 
   database: geodb_largest
   storage: 50Gi
   existingSecret: ""
+  persistence:
+   enabled: true
+   existingClaim: postgis-pvc
 
-geodata:
-  storage: 100Gi
-  storageClassName: ""
+
+# --- Import job settings (new) ---
+importer:
+  enabled: true
+  # Use GHCR by default (works for you). You can change to docker.io/osgeo/gdal if preferred.
+  image: ghcr.io/osgeo/gdal:ubuntu-small-3.10.1
+  # Absolute path to the .gdb inside the mounted geodata PVC
   gdbPath: "/data/Utah Inundation Profiles/Utah Inundation Profiles.gdb"
-  # volumeName: geodata-pv
-  # matchLabels: {}
+  # How many times Kubernetes should retry the job
+  backoffLimit: 0
+  resources: {}   # e.g. { limits: { cpu: "2", memory: "4Gi" }, requests: { cpu: "500m", memory: "1Gi" } }
+
+# Ensure this points at your existing PVC name
+geodata:
+  managePVC: true          # set to false when using an existing claim
+  size: 500Gi
+  storageClassName: manual
+  volumeName: geodata-pv
+  #existingClaim: ""        # set via CLI when managePVC=false
+  existingClaim: geodata
+
 
 geoapi:
   replicas: 2
@@ -32,6 +50,9 @@ geoapi:
 
 ingress:
   enabled: true
-  host: api-largest.example.org
-  tlsSecret: geoapi-largest-tls
-  className: nginx
+  host: api.127.0.0.1.sslip.io
+
+service:
+  type: ClusterIP
+  nodePort: null
+

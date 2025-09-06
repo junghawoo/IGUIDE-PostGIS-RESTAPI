@@ -8,7 +8,7 @@ This package deploys:
 - A separate PVC `geodata` to mount your `.gdb` directory for the import Job
 
 ## Prepare data
-Mount your FileGDB at the path `/data/Utah Inundation Profiles.gdb` via the `geodata` PVC
+Mount your FileGDB at the path `/data/Utah Inundation Profiles/Utah Inundation Profiles.gdb` via the `geodata` PVC
 (see `templates/geodata-pvc.yaml`). You can bind that PVC to a hostPath, NFS, or cloud disk.
 
 ## Build & push the API image
@@ -63,6 +63,16 @@ helm upgrade --install geo-risk-largest ./chart/geo-risk-largest \
   -f geodata-values.yaml \
   --set postgres.existingSecret=pg-secret
 ```
+## Import job & precomputed cache
+
+This chart runs a post-install/upgrade Job `geodata-import-largest` that:
+- Mounts your `geodata` PVC at `/data`
+- Imports layers from the FileGDB at `importer.gdbPath`
+- Builds `gis.inundation_zones_largest` and creates/fills `gis.risk_metrics_cache` with the columns the API expects
+
+See `vm-values.yaml` for a working NodePort config (30080).  
+`ops/geodata-pv-pvc.yaml` contains a hostPath example for `/media/volume/aging-dams-data/geodata`.
+
 
 # Upgrade and keep hooks
 ```bash
@@ -97,6 +107,60 @@ kubectl -n geo-risk-largest logs job/geodata-import-largest -f
    ```bash
    kubectl -n geo-risk-largest port-forward svc/geoapi 8080:80
    ```
+
+
+
+## Importing data + precomputing metrics
+
+The chart includes a post-install/upgrade **Job** (`geodata-import-largest`) that:
+
+- mounts your `geodata` PVC at `/data`
+- imports layers from the FileGDB at `importer.gdbPath`
+- creates the `gis.inundation_zones_largest` view
+- builds and fills `gis.risk_metrics_cache` with all columns the API expects
+
+### Settings
+
+```yaml
+importer:
+  enabled: true
+  image: ghcr.io/osgeo/gdal:ubuntu-small-3.10.1   # change if needed
+  gdbPath: "/data/Utah Inundation Profiles/Utah Inundation Profiles.gdb"
+```
+
+If your cluster cannot pull from ghcr.io, point importer.image to docker.io/osgeo/gdal:ubuntu-small-3.10.1 and (if needed) create the registry secret and attach it to the namespace’s default ServiceAccount:
+
+```bash
+kubectl -n <ns> create secret docker-registry ghcr-cred \
+  --docker-server=ghcr.io \
+  --docker-username="$GHCR_USER" \
+  --docker-password="$GHCR_PAT"
+
+kubectl -n <ns> patch serviceaccount default \
+  -p '{"imagePullSecrets":[{"name":"ghcr-cred"}]}'
+```
+```yaml
+
+---
+
+## How to test quickly
+
+```bash
+# Rerun the import job
+kubectl -n geo-risk-largest delete job geodata-import-largest --ignore-not-found
+helm upgrade --install geo-risk-largest ./chart/geo-risk-largest -n geo-risk-largest --wait
+
+# Watch logs
+kubectl -n geo-risk-largest logs -f job/geodata-import-largest
+```
+
+
+
+
+
+
+
+
 
 
 ## Testing the GeoAPI from the Command Line

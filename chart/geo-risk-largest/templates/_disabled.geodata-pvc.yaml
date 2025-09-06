@@ -1,0 +1,15 @@
+{{- if (default true .Values.geodata.managePVC) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: geodata
+spec:
+  accessModes: [ "ReadWriteOnce" ]
+  resources:
+    requests:
+      storage: {{ .Values.geodata.size | default "500Gi" }}
+  storageClassName: {{ (default "manual" .Values.geodata.storageClassName) | quote }}
+  volumeName: {{ (default "geodata-pv" .Values.geodata.volumeName) | quote }}
+  volumeMode: Filesystem
+{{- end }}
+

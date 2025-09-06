@@ -1,0 +1,28 @@
+# geodata-pv.yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: geodata-pv
+spec:
+  capacity:
+    storage: 500Gi
+  accessModes: [ "ReadWriteOnce" ]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: /media/volume/aging-dams-data/geodata       # <-- this must exist on the VM
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: geodata
+  namespace: geo-risk-largest
+spec:
+  storageClassName: manual
+  volumeName: geodata-pv
+  accessModes: [ "ReadWriteOnce" ]
+  resources:
+    requests:
+      storage: 500Gi
+

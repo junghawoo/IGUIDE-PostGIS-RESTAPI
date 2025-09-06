@@ -1,0 +1,27 @@
+postgres:
+  image:
+    repository: postgis/postgis
+    tag: "16-3.4"
+  persistence:
+    enabled: true
+    existingClaim: postgis-pvc
+
+geodata:
+  existingClaim: geodata
+
+image:
+  repository: ghcr.io/iguide-postgis/geoapi
+  tag: devfix
+  pullPolicy: IfNotPresent
+
+ingress:
+  host: "api.149.165.159.192.sslip.io"
+
+
+service:
+  type: NodePort
+  nodePort: 30080
+ingress:
+  enabled: false
+
+

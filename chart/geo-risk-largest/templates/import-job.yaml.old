@@ -18,6 +18,8 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       restartPolicy: Never
+
+      # ---- MOUNT THE EXISTING PVC WITH YOUR DATA ----
       volumes:
       - name: import-data
         persistentVolumeClaim:
@@ -33,9 +35,11 @@ spec:
             name: pg-secret
         - configMapRef:
             name: pg-config
+
         volumeMounts:
         - name: import-data
           mountPath: /data
+
         command: ["/bin/bash","-lc"]
         args:
         - |
@@ -68,24 +72,26 @@ spec:
           PSQL="psql -h postgres -U ${POSTGRES_USER} -d ${POSTGRES_DB} -v ON_ERROR_STOP=1"
           OGR_PG="PG:host=postgres dbname=${POSTGRES_DB} user=${POSTGRES_USER} password=${POSTGRES_PASSWORD}"
           GDB="{{ .Values.importer.gdbPath }}"
-          $PSQL_SYS -c "SELECT set_config('app.dbname', '${POSTGRES_DB}', false)"
 
           echo "== Ensure target DB exists =="
           $PSQL_SYS <<'SQL'
           DO $$
-          DECLARE dbname text := current_setting('app.dbname', true);
           BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname=dbname) THEN
-              EXECUTE format('CREATE DATABASE %I', dbname);
+            IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = current_setting('app.dbname', true)) THEN
+              EXECUTE format('CREATE DATABASE %I', current_setting('app.dbname', true));
             END IF;
           END$$;
           SQL
+
+          # Rebind app.dbname just for above DO block (pg requires)
+          $PSQL_SYS -c "SELECT set_config('app.dbname', '${POSTGRES_DB}', false)"
 
           echo "== Extensions & schema =="
           $PSQL -c "CREATE EXTENSION IF NOT EXISTS postgis;"
           $PSQL -c "CREATE SCHEMA IF NOT EXISTS gis;"
 
           echo "== Import core layers via GDAL =="
+          # Raw inundation polygons and NID points
           ogr2ogr -f PostgreSQL "$OGR_PG" "$GDB" "Utah_Dam_Inundation_Zones" \
             -nln gis.inundation_zones_raw \
             -overwrite -t_srs EPSG:4326 -lco GEOMETRY_NAME=geom \
@@ -134,7 +140,6 @@ spec:
           $PSQL -c "CREATE INDEX IF NOT EXISTS inundation_zones_raw_geom_gix      ON gis.inundation_zones_raw USING GIST (geom);"
           $PSQL -c "CREATE INDEX IF NOT EXISTS inundation_zones_raw_damnumber_idx ON gis.inundation_zones_raw (damnumber);"
           $PSQL -c "CREATE INDEX IF NOT EXISTS dams_nid_geom_gix                   ON gis.dams_nid USING GIST (geom);"
-          $PSQL -c "ANALYZE gis.inundation_zones_raw; ANALYZE gis.dams_nid;"
 
           $PSQL -c "CREATE INDEX IF NOT EXISTS svi_tracts_geom_gix       ON gis.svi_tracts USING GIST(geom);"
           $PSQL -c "CREATE INDEX IF NOT EXISTS aviation_geom_gix         ON gis.aviation USING GIST(geom);"
@@ -151,6 +156,7 @@ spec:
 
           echo "== Precompute cache table (schema + fill) =="
           $PSQL <<'SQL'
+          -- Ensure table and columns expected by the API
           CREATE TABLE IF NOT EXISTS gis.risk_metrics_cache(
             damnumber text PRIMARY KEY,
             dam_name text,
@@ -166,6 +172,7 @@ spec:
             svi_tracts_area_m2 double precision
           );
 
+          -- Backfill any missing columns without errors on next runs
           DO $$
           DECLARE
             col RECORD;
@@ -216,20 +223,49 @@ spec:
             COALESCE(gap.ar,0) AS gap_status_area_m2,
             COALESCE(svi.ar,0) AS svi_tracts_area_m2
           FROM gis.inundation_zones_largest z
-          LEFT JOIN LATERAL (SELECT COUNT(*) ct FROM gis.aviation t WHERE ST_Intersects(t.geom, z.geom)) a ON TRUE
-          LEFT JOIN LATERAL (SELECT COUNT(*) ct FROM gis.hazardous_waste t WHERE ST_Intersects(t.geom, z.geom)) hw ON TRUE
-          LEFT JOIN LATERAL (SELECT COUNT(*) ct FROM gis.hospitals t WHERE ST_Intersects(t.geom, z.geom)) h ON TRUE
-          LEFT JOIN LATERAL (SELECT COUNT(*) ct FROM gis.power_plants t WHERE ST_Intersects(t.geom, z.geom)) pp ON TRUE
-          LEFT JOIN LATERAL (SELECT COUNT(*) ct FROM gis.wwtp t WHERE ST_Intersects(t.geom, z.geom)) ww ON TRUE
-          LEFT JOIN LATERAL (SELECT COALESCE(SUM(ST_Length(ST_Intersection(t.geom, z.geom)::geography)),0)::double precision AS len FROM gis.ng_pipelines t WHERE ST_Intersects(t.geom, z.geom)) ng ON TRUE
-          LEFT JOIN LATERAL (SELECT COALESCE(SUM(ST_Length(ST_Intersection(t.geom, z.geom)::geography)),0)::double precision AS len FROM gis.railroads t WHERE ST_Intersects(t.geom, z.geom)) rr ON TRUE
-          LEFT JOIN LATERAL (SELECT COALESCE(SUM(ST_Length(ST_Intersection(t.geom, z.geom)::geography)),0)::double precision AS len FROM gis.transportation t WHERE ST_Intersects(t.geom, z.geom)) tr ON TRUE
-          LEFT JOIN LATERAL (SELECT COALESCE(SUM(ST_Area(ST_Intersection(t.geom, z.geom)::geography)),0)::double precision AS ar FROM gis.gap_status t WHERE ST_Intersects(t.geom, z.geom)) gap ON TRUE
-          LEFT JOIN LATERAL (SELECT COALESCE(SUM(ST_Area(ST_Intersection(t.geom, z.geom)::geography)),0)::double precision AS ar FROM gis.svi_tracts t WHERE ST_Intersects(t.geom, z.geom)) svi ON TRUE
+          -- counts
+          LEFT JOIN LATERAL (
+            SELECT COUNT(*) ct FROM gis.aviation t WHERE ST_Intersects(t.geom, z.geom)
+          ) a ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT COUNT(*) ct FROM gis.hazardous_waste t WHERE ST_Intersects(t.geom, z.geom)
+          ) hw ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT COUNT(*) ct FROM gis.hospitals t WHERE ST_Intersects(t.geom, z.geom)
+          ) h ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT COUNT(*) ct FROM gis.power_plants t WHERE ST_Intersects(t.geom, z.geom)
+          ) pp ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT COUNT(*) ct FROM gis.wwtp t WHERE ST_Intersects(t.geom, z.geom)
+          ) ww ON TRUE
+          -- lengths (m)
+          LEFT JOIN LATERAL (
+            SELECT COALESCE(SUM(ST_Length(ST_Intersection(t.geom, z.geom)::geography)),0)::double precision AS len
+            FROM gis.ng_pipelines t WHERE ST_Intersects(t.geom, z.geom)
+          ) ng ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT COALESCE(SUM(ST_Length(ST_Intersection(t.geom, z.geom)::geography)),0)::double precision AS len
+            FROM gis.railroads t WHERE ST_Intersects(t.geom, z.geom)
+          ) rr ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT COALESCE(SUM(ST_Length(ST_Intersection(t.geom, z.geom)::geography)),0)::double precision AS len
+            FROM gis.transportation t WHERE ST_Intersects(t.geom, z.geom)
+          ) tr ON TRUE
+          -- areas (m²)
+          LEFT JOIN LATERAL (
+            SELECT COALESCE(SUM(ST_Area(ST_Intersection(t.geom, z.geom)::geography)),0)::double precision AS ar
+            FROM gis.gap_status t WHERE ST_Intersects(t.geom, z.geom)
+          ) gap ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT COALESCE(SUM(ST_Area(ST_Intersection(t.geom, z.geom)::geography)),0)::double precision AS ar
+            FROM gis.svi_tracts t WHERE ST_Intersects(t.geom, z.geom)
+          ) svi ON TRUE
           ;
 
           CREATE INDEX IF NOT EXISTS risk_metrics_cache_damnumber_idx ON gis.risk_metrics_cache(damnumber);
           ANALYZE gis.risk_metrics_cache;
+          SQL
 
           echo "== Import job completed =="
 

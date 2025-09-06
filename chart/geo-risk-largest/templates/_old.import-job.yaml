@@ -1,0 +1,138 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: geodata-import-largest-{{ .Release.Revision }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: geodata-import-largest
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    # Keep old jobs around so we can inspect logs if something fails.
+    # Helm will auto-clean *before* creating a new one on the next upgrade.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+spec:
+  # Don’t retry to keep failed pod & logs
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: importer
+          image: ghcr.io/osgeo/gdal:ubuntu-small-3.10.1
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: {{ default "pg-secret" .Values.postgres.existingSecret }}
+            - configMapRef:
+                name: pg-config
+          command: ["/bin/bash","-lc"]
+          args:
+            - |
+              set -euo pipefail
+              set -x
+              trap 'echo "FAILED at line $LINENO"' ERR
+              export DEBIAN_FRONTEND=noninteractive
+
+              # 0) Ensure Postgres is reachable (avoid race)
+              until PGPASSWORD="${POSTGRES_PASSWORD}" psql -h postgres -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -c "select 1" >/dev/null 2>&1; do
+                echo "Waiting for postgres..."
+                sleep 2
+              done
+
+              # 1) psql client
+              apt-get update -y
+              apt-get install -y --no-install-recommends postgresql-client
+              rm -rf /var/lib/apt/lists/*
+
+              # 2) Connections for GDAL vs. psql
+              export PGPASSWORD="${POSTGRES_PASSWORD}"
+              OGR_PG="PG:host=postgres dbname=${POSTGRES_DB} user=${POSTGRES_USER} password=${POSTGRES_PASSWORD}"
+              PSQL="psql -h postgres -U ${POSTGRES_USER} -d ${POSTGRES_DB} -v ON_ERROR_STOP=1"
+
+              # 3) Data source
+              GDB="/data/Utah Inundation Profiles/Utah Inundation Profiles.gdb"
+
+              $PSQL -c "CREATE SCHEMA IF NOT EXISTS gis;"
+
+              echo "Importing Utah_Dam_Inundation_Zones (raw)..."
+              ogr2ogr -f PostgreSQL "$OGR_PG" "$GDB" "Utah_Dam_Inundation_Zones" \
+                -nln gis.inundation_zones_raw \
+                -overwrite -t_srs EPSG:4326 -lco GEOMETRY_NAME=geom \
+                -nlt CONVERT_TO_LINEAR -nlt PROMOTE_TO_MULTI -dim XY -progress
+
+              echo "Importing UtahDamInundationZones_NID_Dataset (raw)..."
+              ogr2ogr -f PostgreSQL "$OGR_PG" "$GDB" "UtahDamInundationZones_NID_Dataset" \
+                -nln gis.dams_nid \
+                -overwrite -t_srs EPSG:4326 -lco GEOMETRY_NAME=geom \
+                -nlt CONVERT_TO_LINEAR -nlt PROMOTE_TO_MULTI -dim XY -progress
+
+              echo "Create normalized views..."
+              $PSQL -c "DROP VIEW IF EXISTS gis.inundation_zones CASCADE;"
+              $PSQL -c "
+                CREATE VIEW gis.inundation_zones AS
+                SELECT objectid, damnumber, dam_name, geom
+                FROM gis.inundation_zones_raw;
+              "
+              $PSQL -c "
+                CREATE OR REPLACE VIEW gis.inundation_zones_largest AS
+                SELECT objectid, damnumber, dam_name, geom
+                FROM (
+                  SELECT objectid, damnumber, dam_name, geom,
+                         ROW_NUMBER() OVER (
+                           PARTITION BY damnumber
+                           ORDER BY ST_Area(geom::geography) DESC
+                         ) AS rn
+                  FROM gis.inundation_zones_raw
+                ) s
+                WHERE rn = 1;
+              "
+
+              echo "Importing vulnerability layers..."
+              ogr2ogr -f PostgreSQL "$OGR_PG" "$GDB" "Utah_Census_Tracts_SVI"      -nln gis.svi_tracts     -overwrite -t_srs EPSG:4326 -lco GEOMETRY_NAME=geom -nlt CONVERT_TO_LINEAR -nlt PROMOTE_TO_MULTI -dim XY -progress
+              ogr2ogr -f PostgreSQL "$OGR_PG" "$GDB" "Aviation_Facilities"         -nln gis.aviation       -overwrite -t_srs EPSG:4326 -lco GEOMETRY_NAME=geom -nlt CONVERT_TO_LINEAR -nlt PROMOTE_TO_MULTI -dim XY -progress
+              ogr2ogr -f PostgreSQL "$OGR_PG" "$GDB" "GAP_Status_1and2"            -nln gis.gap_status     -overwrite -t_srs EPSG:4326 -lco GEOMETRY_NAME=geom -nlt CONVERT_TO_LINEAR -nlt PROMOTE_TO_MULTI -dim XY -progress
+              ogr2ogr -f PostgreSQL "$OGR_PG" "$GDB" "Hazardous_Waste"             -nln gis.hazardous_waste -overwrite -t_srs EPSG:4326 -lco GEOMETRY_NAME=geom -nlt CONVERT_TO_LINEAR -nlt PROMOTE_TO_MULTI -dim XY -progress
+              ogr2ogr -f PostgreSQL "$OGR_PG" "$GDB" "Hospitals"                   -nln gis.hospitals      -overwrite -t_srs EPSG:4326 -lco GEOMETRY_NAME=geom -nlt CONVERT_TO_LINEAR -nlt PROMOTE_TO_MULTI -dim XY -progress
+              ogr2ogr -f PostgreSQL "$OGR_PG" "$GDB" "Natural_Gas_Pipelines"       -nln gis.ng_pipelines   -overwrite -t_srs EPSG:4326 -lco GEOMETRY_NAME=geom -nlt CONVERT_TO_LINEAR -nlt PROMOTE_TO_MULTI -dim XY -progress
+              ogr2ogr -f PostgreSQL "$OGR_PG" "$GDB" "Power_Plants"                -nln gis.power_plants   -overwrite -t_srs EPSG:4326 -lco GEOMETRY_NAME=geom -nlt CONVERT_TO_LINEAR -nlt PROMOTE_TO_MULTI -dim XY -progress
+              ogr2ogr -f PostgreSQL "$OGR_PG" "$GDB" "Railroads"                   -nln gis.railroads      -overwrite -t_srs EPSG:4326 -lco GEOMETRY_NAME=geom -nlt CONVERT_TO_LINEAR -nlt PROMOTE_TO_MULTI -dim XY -progress
+              ogr2ogr -f PostgreSQL "$OGR_PG" "$GDB" "Transportation"              -nln gis.transportation -overwrite -t_srs EPSG:4326 -lco GEOMETRY_NAME=geom -nlt CONVERT_TO_LINEAR -nlt PROMOTE_TO_MULTI -dim XY -progress
+              ogr2ogr -f PostgreSQL "$OGR_PG" "$GDB" "Wastewater_Treatment_Plants" -nln gis.wwtp           -overwrite -t_srs EPSG:4326 -lco GEOMETRY_NAME=geom -nlt CONVERT_TO_LINEAR -nlt PROMOTE_TO_MULTI -dim XY -progress
+
+              echo "Indexing & ANALYZE..."
+              # Base tables
+              $PSQL -c "CREATE INDEX IF NOT EXISTS inundation_zones_raw_geom_gix     ON gis.inundation_zones_raw USING GIST (geom);"
+              $PSQL -c "CREATE INDEX IF NOT EXISTS inundation_zones_raw_damnumber_idx ON gis.inundation_zones_raw (damnumber);"
+              $PSQL -c "CREATE INDEX IF NOT EXISTS dams_nid_geom_gix                  ON gis.dams_nid USING GIST (geom);"
+              $PSQL -c "ANALYZE gis.inundation_zones_raw;"
+              $PSQL -c "ANALYZE gis.dams_nid;"
+
+              # Other layers
+              $PSQL -c "CREATE INDEX IF NOT EXISTS svi_tracts_geom_gix       ON gis.svi_tracts     USING GIST(geom);"
+              $PSQL -c "CREATE INDEX IF NOT EXISTS aviation_geom_gix         ON gis.aviation       USING GIST(geom);"
+              $PSQL -c "CREATE INDEX IF NOT EXISTS gap_status_geom_gix       ON gis.gap_status     USING GIST(geom);"
+              $PSQL -c "CREATE INDEX IF NOT EXISTS hazardous_waste_geom_gix  ON gis.hazardous_waste USING GIST(geom);"
+              $PSQL -c "CREATE INDEX IF NOT EXISTS hospitals_geom_gix        ON gis.hospitals      USING GIST(geom);"
+              $PSQL -c "CREATE INDEX IF NOT EXISTS ng_pipelines_geom_gix     ON gis.ng_pipelines   USING GIST(geom);"
+              $PSQL -c "CREATE INDEX IF NOT EXISTS power_plants_geom_gix     ON gis.power_plants   USING GIST(geom);"
+              $PSQL -c "CREATE INDEX IF NOT EXISTS railroads_geom_gix        ON gis.railroads      USING GIST(geom);"
+              $PSQL -c "CREATE INDEX IF NOT EXISTS transportation_geom_gix   ON gis.transportation USING GIST(geom);"
+              $PSQL -c "CREATE INDEX IF NOT EXISTS wwtp_geom_gix             ON gis.wwtp           USING GIST(geom);"
+
+              # Dams lookup index — dataset has 'damnumber'
+              $PSQL -c "CREATE INDEX IF NOT EXISTS dams_nid_damnumber_idx ON gis.dams_nid (damnumber);"
+
+              echo "Import complete."
+          volumeMounts:
+            - name: import-data
+              mountPath: /data
+      volumes:
+        - name: import-data
+          persistentVolumeClaim:
+      volumes:
+      - name: import-data
+        persistentVolumeClaim:
+            claimName: {{ .Values.geodata.existingClaim | default "geodata" }}
+

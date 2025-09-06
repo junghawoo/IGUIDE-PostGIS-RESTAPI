@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: {{ .Values.postgres.image }}
+          image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
           envFrom:
             - secretRef:
                 name: {{ default "pg-secret" .Values.postgres.existingSecret }}
